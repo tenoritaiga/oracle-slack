@@ -61,7 +61,13 @@ def handle_message(client, event):
         print("event {0} has no user".format(event))
         return
 
-    if msguser["name"] == botname or msguser["name"].lower() == "slackbot":
+    try:
+        if msguser["name"] == botname or msguser["name"].lower() == "slackbot":
+            return
+    except:
+        print("error occurred when reading message")
+        print("{0}".format(sys.exc_info()[0]))
+        print("{0}".format(traceback.format_exc()))
         return
 
     text = "\n".join(run_hook("message", event, {"client": client, "config": config, "hooks": hooks}))
