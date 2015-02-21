@@ -61,19 +61,21 @@ def handle_message(client, event):
         print("event {0} has no user".format(event))
         return
 
-    try:
-        if msguser["name"] == botname or msguser["name"].lower() == "slackbot":
-            return
-    except:
-        print("error occurred when reading message")
-        print("{0}".format(sys.exc_info()[0]))
-        print("{0}".format(traceback.format_exc()))
+    #happens when a new user joins the team
+    #slask doesn't update its list of users
+    #and searching through users returns None
+    if msguser is None:
+        print("msguser is None")
+        return
+
+    if msguser["name"] == botname or msguser["name"].lower() == "slackbot":
         return
 
     text = "\n".join(run_hook("message", event, {"client": client, "config": config, "hooks": hooks}))
 
     if text:
         client.rtm_send_message(event["channel"], text)
+
 
 event_handlers = {
     "message": handle_message
