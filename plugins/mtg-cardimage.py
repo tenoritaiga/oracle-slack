@@ -10,7 +10,7 @@ def mtg(cardname):
   searchurl = "http://mtgimage.com/card/"+cardname+".jpg"
   searchurl = searchurl.replace(" ", "_")
   
-  resp = requests.get(searchurl);
+  resp = requests.get(searchurl)
   
   if resp.status_code == 200:
     return searchurl
