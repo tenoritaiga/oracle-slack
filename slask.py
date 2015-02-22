@@ -1,30 +1,50 @@
 #!/usr/bin/env python
 from __future__ import print_function
-from config import config
 from glob import glob
 import importlib
+import logging
 import os
 import re
-from slackclient import SlackClient
 import sys
 import time
 import traceback
 
-curdir = os.path.dirname(os.path.abspath(__file__))
-os.chdir(curdir)
+from slackclient import SlackClient
 
-from config import config
+def init_log(config):
+    loglevel = config.get("loglevel", logging.INFO)
+    logformat = config.get("logformat", '%(asctime)s:%(levelname)s:%(message)s')
+    if config.get("logfile"):
+        logfile = config.get("logfile", "slask.log")
+        handler = logging.FileHandler(logfile)
+    else:
+        handler = logging.StreamHandler()
 
-hooks = {}
-def init_plugins():
-    for plugin in glob('plugins/[!_]*.py'):
-        print("plugin: {0}".format(plugin))
+    # create logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(loglevel)
+
+    handler.setLevel(loglevel)
+
+    # create formatter
+    formatter = logging.Formatter(logformat)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    # make it the root logger (I hate the logging module)
+    logging.root = logger
+
+def init_plugins(plugindir):
+    hooks = {}
+
+    for plugin in glob(os.path.join(plugindir, "[!_]*.py")):
+        logging.debug("plugin: {0}".format(plugin))
         try:
             mod = importlib.import_module(plugin.replace(os.path.sep, ".")[:-3])
             modname = mod.__name__.split('.')[1]
             for hook in re.findall("on_(\w+)", " ".join(dir(mod))):
                 hookfun = getattr(mod, "on_" + hook)
-                print("attaching {0}.{1} to {2}".format(modname, hookfun, hook))
+                logging.debug("attaching {0}.{1} to {2}".format(modname, hookfun, hook))
                 hooks.setdefault(hook, []).append(hookfun)
 
             if mod.__doc__:
@@ -35,13 +55,13 @@ def init_plugins():
         #bare except, because the modules could raise any number of errors
         #on import, and we want them not to kill our server
         except:
-            print("import failed on module {0}, module not loaded".format(plugin))
-            print("{0}".format(sys.exc_info()[0]))
-            print("{0}".format(traceback.format_exc()))
+            logging.info("import failed on module {0}, module not loaded".format(plugin))
+            logging.info("{0}".format(sys.exc_info()[0]))
+            logging.info("{0}".format(traceback.format_exc()))
 
-init_plugins()
+    return hooks
 
-def run_hook(hook, data, server):
+def run_hook(hooks, hook, data, server):
     responses = []
     for hook in hooks.get(hook, []):
         h = hook(data, server)
@@ -49,16 +69,16 @@ def run_hook(hook, data, server):
 
     return responses
 
-def handle_message(client, event):
+def handle_message(client, event, hooks, config):
     # ignore bot messages and edits
     subtype = event.get("subtype", "")
     if subtype == "bot_message" or subtype == "message_changed": return
 
-    botname = sc.server.login_data["self"]["name"]
+    botname = client.server.login_data["self"]["name"]
     try:
         msguser = client.server.users.get(event["user"])
     except KeyError:
-        print("event {0} has no user".format(event))
+        logging.debug("event {0} has no user".format(event))
         return
 
     #happens when a new user joins the team
@@ -71,27 +91,71 @@ def handle_message(client, event):
     if msguser["name"] == botname or msguser["name"].lower() == "slackbot":
         return
 
-    text = "\n".join(run_hook("message", event, {"client": client, "config": config, "hooks": hooks}))
-
-    if text:
-        client.rtm_send_message(event["channel"], text)
+    return "\n".join(run_hook(hooks, "message", event, {"client": client, "config": config, "hooks": hooks}))
 
 
 event_handlers = {
     "message": handle_message
 }
 
-if __name__=="__main__":
-    sc = SlackClient(config["token"])
-    if sc.rtm_connect():
-        users = sc.server.users
+def handle_event(client, event, hooks, config):
+    handler = event_handlers.get(event.get("type"))
+    if handler:
+        return handler(client, event, hooks, config)
+    return None
+
+def main(config):
+    init_log(config)
+    hooks = init_plugins("plugins")
+
+    client = SlackClient(config["token"])
+    if client.rtm_connect():
+        users = client.server.users
         while True:
-            events = sc.rtm_read()
+            events = client.rtm_read()
             for event in events:
-                #print "got {0}".format(event.get("type", event))
-                handler = event_handlers.get(event.get("type"))
-                if handler:
-                    handler(sc, event)
+                logging.debug("got {0}".format(event.get("type", event)))
+                response = handle_event(client, event, hooks, config)
+                if response:
+                    client.rtm_send_message(event["channel"], response)
             time.sleep(1)
     else:
-        print("Connection Failed, invalid token <{0}>?".format(config["token"]))
+        logging.warn("Connection Failed, invalid token <{0}>?".format(config["token"]))
+
+def run_cmd(client, cmd, hook):
+    hooks = init_plugins("plugins")
+    event = { 'type': hook, 'text': cmd, "user": "msguser" }
+    return handle_event(client, event, hooks, config)
+
+def repl(config, client, hook):
+    try:
+        while 1:
+            cmd = raw_input("slask> ")
+            if cmd.lower() == "quit" or cmd.lower() == "exit":
+                return
+
+            print(run_cmd(client, cmd, hook))
+    except (EOFError, KeyboardInterrupt):
+        print()
+        pass
+
+if __name__=="__main__":
+    from config import config
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run the slask chatbot for Slack")
+    parser.add_argument('--test', '-t', dest='test', action='store_true', required=False,
+                        help='Enter command line mode to enter a slask repl')
+    parser.add_argument('--hook', dest='hook', action='store', default='message',
+                        help='Specify the hook to test. (Defaults to "message")')
+    parser.add_argument('-c', dest="command", help='run a single command')
+    args = parser.parse_args()
+
+    if args.test:
+        from test import FakeClient
+        repl(config, FakeClient(), args.hook)
+    elif args.command:
+        from test import FakeClient
+        print(run_cmd(FakeClient(), args.command, args.hook))
+    else:
+        main(config)
